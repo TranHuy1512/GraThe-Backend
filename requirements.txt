@@ -1,0 +1,13 @@
+fastapi[standard]
+uvicorn[standard]
+python-multipart
+pydantic-settings
+PyMuPDF
+pillow
+
+# AI module dependencies
+gradio
+huggingface_hub
+torch
+torchvision
+numpy
