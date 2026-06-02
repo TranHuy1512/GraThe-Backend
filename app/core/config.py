@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     UPLOAD_DIR: Path | None = None
     RESTORED_DIR: Path | None = None
     RESTORED_URL_PREFIX: str = "/restored"
+    AI_RESTORATION_SPACE: str = "elnino1512/AI-Document-image-enhencement"
+    AI_RESTORATION_API_NAME: str = "/restore_image"
 
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     MAX_UPLOAD_MB: int = 50

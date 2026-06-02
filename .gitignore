@@ -6,4 +6,4 @@ storage/uploads/*
 storage/restored/*
 !storage/uploads/.gitkeep
 !storage/restored/.gitkeep
-# doc_photo_classification.ipynb
+doc_photo_classification.ipynb

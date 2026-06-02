@@ -118,7 +118,7 @@ Form fields:
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `file` | file | yes | - | PDF hoặc image (`png`, `jpg`, `jpeg`, `webp`, `tif`, `tiff`, `bmp`). |
+| `file` | file | yes | - | Degraded image (`png`, `jpg`, `jpeg`, `webp`, `tif`, `tiff`, `bmp`). |
 | `patch_size` | int | no | `512` | Kích thước patch. Hỗ trợ `256`, `384`, `512`, `768`. |
 | `batch_size` | int | no | `4` | Số patch xử lý mỗi batch. CPU/máy yếu nên để thấp. |
 | `threshold` | float | no | `0.5` | Ngưỡng binarize, dùng khi `binarize_output=true`. |
@@ -152,7 +152,7 @@ cURL example:
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/api/v1/restorations" \
-  -F "file=@/path/to/document.pdf" \
+  -F "file=@/path/to/degraded-image.jpeg" \
   -F "patch_size=512" \
   -F "batch_size=4" \
   -F "threshold=0.5" \
@@ -169,8 +169,8 @@ http://127.0.0.1:8000/restored/{request_id}/page-001.png
 ## Ghi chú luồng xử lý
 
 ```text
-upload PDF/image -> validate -> save upload -> load image pages -> lazy-load AI module -> restore từng page -> save PNG -> return output URLs
+upload degraded image -> validate -> save upload -> call remote Gradio AI restoration API -> save restored image -> return output URL
 ```
 
-Model trong `AI-Document-image-enhencement/app.py` sẽ được load lần đầu khi gọi restore, không load ngay lúc start server.
+Remote AI restoration Space mặc định là `elnino1512/AI-Document-image-enhencement`, API name mặc định là `/restore_image`.
 # GraThe-Backend

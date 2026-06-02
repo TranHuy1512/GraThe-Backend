@@ -5,6 +5,7 @@ pydantic-settings
 PyMuPDF
 pillow
 onnxruntime
+gradio_client
 
 # AI module dependencies
 gradio
