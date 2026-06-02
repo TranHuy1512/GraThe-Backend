@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     BASE_DIR: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[2])
     AI_PROJECT_DIR: Path | None = None
+    CLASSIFICATION_MODEL_PATH: Path | None = None
     UPLOAD_DIR: Path | None = None
     RESTORED_DIR: Path | None = None
     RESTORED_URL_PREFIX: str = "/restored"
@@ -36,6 +37,8 @@ class Settings(BaseSettings):
         repo_root = self.BASE_DIR.parent
         if self.AI_PROJECT_DIR is None:
             self.AI_PROJECT_DIR = repo_root / "AI-Document-image-enhencement"
+        if self.CLASSIFICATION_MODEL_PATH is None:
+            self.CLASSIFICATION_MODEL_PATH = self.BASE_DIR / "AI_models" / "mobilenet_v3_small_quant.onnx"
         if self.UPLOAD_DIR is None:
             self.UPLOAD_DIR = self.BASE_DIR / "storage" / "uploads"
         if self.RESTORED_DIR is None:

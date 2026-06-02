@@ -51,6 +51,62 @@ GET http://127.0.0.1:8000/api/v1/health
 
 ## API
 
+### Classify Document Or Photo
+
+```text
+POST /api/v1/classifications
+Content-Type: multipart/form-data
+```
+
+Form fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `file` | file | yes | Image cần classify. |
+
+Pipeline:
+
+```text
+image -> RGB -> resize 224x224 -> ImageNet normalization -> ONNX Runtime -> softmax -> class + confidence
+```
+
+Class mapping:
+
+| Class ID | Label |
+| --- | --- |
+| `0` | `document` |
+| `1` | `photo` |
+
+Response:
+
+```json
+{
+  "filename": "input.png",
+  "predicted_class_id": 0,
+  "predicted_class": "document",
+  "confidence": 0.9821,
+  "probabilities": [
+    {
+      "class_id": 0,
+      "label": "document",
+      "confidence": 0.9821
+    },
+    {
+      "class_id": 1,
+      "label": "photo",
+      "confidence": 0.0179
+    }
+  ]
+}
+```
+
+cURL example:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/classifications" \
+  -F "file=@/path/to/input.png"
+```
+
 ### Restore Document
 
 ```text

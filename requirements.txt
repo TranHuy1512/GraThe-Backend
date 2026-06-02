@@ -4,6 +4,7 @@ python-multipart
 pydantic-settings
 PyMuPDF
 pillow
+onnxruntime
 
 # AI module dependencies
 gradio
