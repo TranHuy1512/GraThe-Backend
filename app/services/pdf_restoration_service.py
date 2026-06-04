@@ -1,7 +1,8 @@
-"""Async PDF restoration service.
+"""Async PDF restoration service with per-page R2 cache deduplication.
 
-Pipeline: upload PDF → extract pages → restore via AI (concurrent) →
-upload to R2 → merge to PDF → upload final PDF → mark complete.
+Pipeline: upload PDF → extract pages → hash each page → check R2 cache →
+restore uncached pages via AI (concurrent) → upload to R2 cache →
+merge all pages to PDF → upload final PDF → mark complete.
 """
 
 import asyncio
@@ -22,6 +23,11 @@ from app.services.document_loader import is_pdf
 from app.services.pdf_job_manager import pdf_job_manager
 from app.services.r2_storage import r2_storage_service
 from app.utils.files import safe_filename
+from app.utils.image_hash import (
+    RestorationParams,
+    compute_content_hash_from_path,
+    read_image_as_png_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +133,12 @@ class PdfRestorationService:
     ) -> None:
         """Full pipeline executed as a background ``asyncio.Task``."""
 
+        params = RestorationParams(
+            patch_size=patch_size,
+            threshold=threshold,
+            binarize_output=binarize_output,
+            overlap=overlap,
+        )
         temp_page_paths: list[Path] = []
 
         try:
@@ -152,11 +164,8 @@ class PdfRestorationService:
                         job_id=job_id,
                         page_idx=page_idx,
                         page_path=page_path,
-                        patch_size=patch_size,
+                        params=params,
                         batch_size=batch_size,
-                        threshold=threshold,
-                        binarize_output=binarize_output,
-                        overlap=overlap,
                     )
 
             results: list[tuple[PageResult, bytes]] = await asyncio.gather(
@@ -203,7 +212,7 @@ class PdfRestorationService:
             pdf_path.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ #
-    #  Page-level processing                                              #
+    #  Page-level processing with cache                                   #
     # ------------------------------------------------------------------ #
 
     async def _restore_and_upload_page(
@@ -211,61 +220,82 @@ class PdfRestorationService:
         job_id: str,
         page_idx: int,
         page_path: Path,
-        patch_size: int,
+        params: RestorationParams,
         batch_size: int,
-        threshold: float,
-        binarize_output: bool,
-        overlap: bool,
     ) -> tuple[PageResult, bytes]:
-        """Restore one page via the AI server, upload to R2, return result + PNG bytes."""
+        """Restore one page, checking the R2 cache first."""
 
         page_num = page_idx + 1
 
-        # 1. Call Gradio AI with retry
+        # 1. Compute content hash
+        content_hash = await run_in_threadpool(
+            compute_content_hash_from_path, page_path, params,
+        )
+        cache_key = r2_storage_service.build_cache_key(content_hash)
+
+        # 2. Check R2 cache
+        if await r2_storage_service.object_exists(cache_key):
+            # CACHE HIT → download restored bytes for PDF merge
+            restored_bytes = await r2_storage_service.download_object(cache_key)
+            public_url = r2_storage_service.build_public_url(cache_key)
+
+            page_result = PageResult(
+                page=page_num,
+                filename=f"page-{page_num:03d}.png",
+                r2_object_key=cache_key,
+                public_url=public_url,
+                content_hash=content_hash,
+                cached=True,
+            )
+            await pdf_job_manager.add_page_result(job_id, page_result)
+            logger.info(
+                "Job %s: page %d CACHE HIT (%s…)",
+                job_id, page_num, content_hash[:12],
+            )
+            return page_result, restored_bytes
+
+        # 3. CACHE MISS → call AI with retry
         restored_path = await self._call_ai_with_retry(
             page_path=page_path,
             page_num=page_num,
-            patch_size=patch_size,
+            params=params,
             batch_size=batch_size,
-            threshold=threshold,
-            binarize_output=binarize_output,
-            overlap=overlap,
         )
 
-        # 2. Read restored image as normalised PNG bytes
+        # 4. Read restored image as PNG bytes
         restored_bytes = await run_in_threadpool(
-            self._read_as_png_bytes, restored_path,
+            read_image_as_png_bytes, restored_path,
         )
 
-        # 3. Upload restored page to R2
-        object_key = r2_storage_service.build_page_object_key(job_id, page_num)
+        # 5. Upload to R2 cache
         public_url = await r2_storage_service.upload_file_bytes(
             content=restored_bytes,
-            object_key=object_key,
+            object_key=cache_key,
             content_type="image/png",
         )
 
-        # 4. Track progress
+        # 6. Track progress
         page_result = PageResult(
             page=page_num,
             filename=f"page-{page_num:03d}.png",
-            r2_object_key=object_key,
+            r2_object_key=cache_key,
             public_url=public_url,
+            content_hash=content_hash,
+            cached=False,
         )
         await pdf_job_manager.add_page_result(job_id, page_result)
-        logger.info("Job %s: page %d restored and uploaded", job_id, page_num)
-
+        logger.info(
+            "Job %s: page %d restored & uploaded (%s…)",
+            job_id, page_num, content_hash[:12],
+        )
         return page_result, restored_bytes
 
     async def _call_ai_with_retry(
         self,
         page_path: Path,
         page_num: int,
-        patch_size: int,
+        params: RestorationParams,
         batch_size: int,
-        threshold: float,
-        binarize_output: bool,
-        overlap: bool,
     ) -> Path:
         """Call the Gradio AI endpoint with automatic retry on transient errors."""
 
@@ -275,11 +305,11 @@ class PdfRestorationService:
                 return await run_in_threadpool(
                     self._call_gradio_restore,
                     page_path,
-                    patch_size,
+                    params.patch_size,
                     batch_size,
-                    threshold,
-                    binarize_output,
-                    overlap,
+                    params.threshold,
+                    params.binarize_output,
+                    params.overlap,
                 )
             except Exception as exc:
                 last_exc = exc
@@ -351,11 +381,7 @@ class PdfRestorationService:
     def _extract_pdf_to_temp_files(
         self, pdf_path: Path, job_id: str,
     ) -> list[Path]:
-        """Render each PDF page as a PNG and save to the upload directory.
-
-        Uses ``pixmap.save()`` directly to avoid loading full RGB PIL
-        images into memory.
-        """
+        """Render each PDF page as a PNG and save to the upload directory."""
 
         zoom = settings.PDF_RENDER_DPI / 72
         matrix = fitz.Matrix(zoom, zoom)
@@ -374,20 +400,8 @@ class PdfRestorationService:
             raise ValueError("PDF has no pages.")
         return temp_paths
 
-    def _read_as_png_bytes(self, path: Path) -> bytes:
-        """Open an image file and re-encode it as PNG bytes."""
-
-        with Image.open(path) as img:
-            buf = BytesIO()
-            img.save(buf, format="PNG")
-            return buf.getvalue()
-
     def _merge_images_to_pdf(self, image_bytes_list: list[bytes]) -> bytes:
-        """Combine a list of PNG byte buffers into a single PDF.
-
-        Page dimensions are derived from pixel sizes and the configured
-        render DPI so the output closely matches the original PDF layout.
-        """
+        """Combine a list of PNG byte buffers into a single PDF."""
 
         doc = fitz.open()
         try:
@@ -395,7 +409,6 @@ class PdfRestorationService:
                 with Image.open(BytesIO(img_bytes)) as img:
                     width_px, height_px = img.size
 
-                # Convert pixels → points (PDF unit = 1/72 inch)
                 width_pt = width_px * 72.0 / settings.PDF_RENDER_DPI
                 height_pt = height_px * 72.0 / settings.PDF_RENDER_DPI
 

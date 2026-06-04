@@ -1,13 +1,21 @@
+"""Pydantic schemas for single-image restoration responses."""
+
 from pydantic import BaseModel, Field
 
 
 class RestoredFile(BaseModel):
+    """Result for a single restored image."""
+
     page: int = Field(..., ge=1)
     filename: str
     url: str
+    content_hash: str
+    cached: bool = False
 
 
 class RestorationResponse(BaseModel):
+    """Response schema for a single-image restoration request."""
+
     request_id: str
     input_filename: str
     input_type: str

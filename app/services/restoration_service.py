@@ -1,17 +1,35 @@
+"""Single-image restoration service with R2 cache deduplication.
+
+Flow: upload image → compute content hash → check R2 cache →
+cache hit: return immediately | cache miss: call AI → upload to R2 → return.
+"""
+
+import logging
+from io import BytesIO
 from pathlib import Path
-from shutil import copyfile
 from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from gradio_client import Client, handle_file
+from PIL import Image, UnidentifiedImageError
 
 from app.core.config import settings
 from app.schemas.restoration import RestorationResponse, RestoredFile
 from app.services.document_loader import is_supported_image
+from app.services.r2_storage import r2_storage_service
 from app.utils.files import safe_filename
+from app.utils.image_hash import (
+    RestorationParams,
+    compute_content_hash,
+    read_image_as_png_bytes,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class RestorationService:
+
     async def restore_upload(
         self,
         file: UploadFile,
@@ -21,55 +39,115 @@ class RestorationService:
         binarize_output: bool,
         overlap: bool,
     ) -> RestorationResponse:
+        """Restore a single image, using R2 cache for deduplication."""
+
         self._validate_options(patch_size, batch_size, threshold)
 
-        request_id = uuid4().hex
-        upload_path = await self._save_upload(file, request_id)
-
-        if not is_supported_image(upload_path):
+        # ---- 1. Read & validate upload ----
+        if not file.filename:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unsupported file type. Please upload a degraded image file.",
+                detail="Missing filename.",
             )
 
-        request_output_dir = settings.RESTORED_DIR / request_id
-        request_output_dir.mkdir(parents=True, exist_ok=True)
+        content = await file.read()
+        max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+        if len(content) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File is larger than {settings.MAX_UPLOAD_MB} MB.",
+            )
 
-        restored_path = self._restore_with_remote_model(
-            image_path=upload_path,
-            output_dir=request_output_dir,
+        try:
+            image = Image.open(BytesIO(content))
+            image.load()  # force full decode to validate
+        except (UnidentifiedImageError, OSError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unsupported file type. Please upload a valid image.",
+            ) from exc
+
+        # ---- 2. Compute content hash ----
+        params = RestorationParams(
             patch_size=patch_size,
-            batch_size=batch_size,
             threshold=threshold,
             binarize_output=binarize_output,
             overlap=overlap,
         )
+        content_hash = await run_in_threadpool(compute_content_hash, image, params)
+        cache_key = r2_storage_service.build_cache_key(content_hash)
 
-        output_filename = f"page-001{restored_path.suffix or '.png'}"
-        output_path = request_output_dir / output_filename
-        if restored_path.resolve() != output_path.resolve():
-            copyfile(restored_path, output_path)
-
-        outputs = [
-            RestoredFile(
-                page=1,
-                filename=output_filename,
-                url=f"{settings.RESTORED_URL_PREFIX}/{request_id}/{output_filename}",
+        # ---- 3. Check R2 cache ----
+        if await r2_storage_service.object_exists(cache_key):
+            public_url = r2_storage_service.build_public_url(cache_key) or ""
+            logger.info("CACHE HIT for %s (%s)", file.filename, content_hash[:12])
+            return self._build_response(
+                content_hash=content_hash,
+                input_filename=file.filename,
+                url=public_url,
+                cached=True,
             )
-        ]
 
+        # ---- 4. Cache miss → save temp file, call AI ----
+        logger.info("CACHE MISS for %s (%s), calling AI…", file.filename, content_hash[:12])
+        temp_path = settings.UPLOAD_DIR / f"{content_hash}-{safe_filename(file.filename)}"
+        temp_path.write_bytes(content)
+
+        try:
+            restored_path = await run_in_threadpool(
+                self._restore_with_remote_model,
+                temp_path, patch_size, batch_size, threshold, binarize_output, overlap,
+            )
+
+            # ---- 5. Read restored image as PNG & upload to R2 cache ----
+            restored_bytes = await run_in_threadpool(
+                read_image_as_png_bytes, restored_path,
+            )
+            public_url = await r2_storage_service.upload_file_bytes(
+                content=restored_bytes,
+                object_key=cache_key,
+                content_type="image/png",
+            )
+
+            return self._build_response(
+                content_hash=content_hash,
+                input_filename=file.filename,
+                url=public_url or "",
+                cached=False,
+            )
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------ #
+    #  Helpers                                                            #
+    # ------------------------------------------------------------------ #
+
+    def _build_response(
+        self,
+        content_hash: str,
+        input_filename: str,
+        url: str,
+        cached: bool,
+    ) -> RestorationResponse:
         return RestorationResponse(
-            request_id=request_id,
-            input_filename=file.filename or upload_path.name,
+            request_id=content_hash,
+            input_filename=input_filename,
             input_type="image",
-            total_pages=len(outputs),
-            outputs=outputs,
+            total_pages=1,
+            outputs=[
+                RestoredFile(
+                    page=1,
+                    filename=f"{content_hash}.png",
+                    url=url,
+                    content_hash=content_hash,
+                    cached=cached,
+                )
+            ],
         )
 
     def _restore_with_remote_model(
         self,
         image_path: Path,
-        output_dir: Path,
         patch_size: int,
         batch_size: int,
         threshold: float,
@@ -77,7 +155,6 @@ class RestorationService:
         overlap: bool,
     ) -> Path:
         try:
-            # client = Client(settings.AI_RESTORATION_SPACE, download_files=output_dir)
             client = Client(settings.AI_RESTORATION_SPACE)
             result = client.predict(
                 image=handle_file(str(image_path)),
@@ -115,27 +192,8 @@ class RestorationService:
                     return path
         return None
 
-    async def _save_upload(self, file: UploadFile, request_id: str) -> Path:
-        if not file.filename:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="Missing filename."
-            )
-
-        content = await file.read()
-        max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
-        if len(content) > max_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"File is larger than {settings.MAX_UPLOAD_MB} MB.",
-            )
-
-        filename = safe_filename(file.filename)
-        upload_path = settings.UPLOAD_DIR / f"{request_id}-{filename}"
-        upload_path.write_bytes(content)
-        return upload_path
-
     def _validate_options(
-        self, patch_size: int, batch_size: int, threshold: float
+        self, patch_size: int, batch_size: int, threshold: float,
     ) -> None:
         if patch_size not in {256, 384, 512, 768}:
             raise HTTPException(

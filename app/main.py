@@ -1,6 +1,5 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -22,7 +21,6 @@ def create_app() -> FastAPI:
     )
 
     settings.ensure_storage_dirs()
-    app.mount(settings.RESTORED_URL_PREFIX, StaticFiles(directory=settings.RESTORED_DIR), name="restored")
     app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
     return app

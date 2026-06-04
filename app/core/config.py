@@ -14,8 +14,6 @@ class Settings(BaseSettings):
     AI_PROJECT_DIR: Path | None = None
     CLASSIFICATION_MODEL_PATH: Path | None = None
     UPLOAD_DIR: Path | None = None
-    RESTORED_DIR: Path | None = None
-    RESTORED_URL_PREFIX: str = "/restored"
     AI_RESTORATION_SPACE: str = "elnino1512/AI-Document-image-enhencement"
     AI_RESTORATION_API_NAME: str = "/restore_image"
 
@@ -32,6 +30,7 @@ class Settings(BaseSettings):
     R2_PUBLIC_BASE_URL: str | None = None
     R2_FASTAPI_PREFIX: str = "backend"
     R2_GRADIO_PREFIX: str = "ai"
+    CACHE_MODEL_PREFIX: str = "fourbi_v1"
 
     DEFAULT_PATCH_SIZE: int = 512
     DEFAULT_BATCH_SIZE: int = 4
@@ -53,12 +52,9 @@ class Settings(BaseSettings):
             self.CLASSIFICATION_MODEL_PATH = self.BASE_DIR / "AI_models" / "mobilenet_v3_small_quant.onnx"
         if self.UPLOAD_DIR is None:
             self.UPLOAD_DIR = self.BASE_DIR / "storage" / "uploads"
-        if self.RESTORED_DIR is None:
-            self.RESTORED_DIR = self.BASE_DIR / "storage" / "restored"
 
     def ensure_storage_dirs(self) -> None:
         self.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        self.RESTORED_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

@@ -36,12 +36,15 @@ class JobState:
         return round((self.processed_pages / self.total_pages) * 100, 1)
 
     def to_response(self) -> PdfJobResponse:
+        cached = sum(1 for p in self.pages if p.cached)
         return PdfJobResponse(
             job_id=self.job_id,
             status=self.status,
             input_filename=self.input_filename,
             total_pages=self.total_pages,
             processed_pages=self.processed_pages,
+            cached_pages=cached,
+            restored_pages=self.processed_pages - cached,
             pages=sorted(self.pages, key=lambda p: p.page),
             output_pdf_url=self.output_pdf_url,
             error=self.error,

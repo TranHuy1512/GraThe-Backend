@@ -25,6 +25,8 @@ class PageResult(BaseModel):
     filename: str
     r2_object_key: str
     public_url: str | None = None
+    content_hash: str = ""
+    cached: bool = False
 
 
 class PdfJobResponse(BaseModel):
@@ -35,6 +37,8 @@ class PdfJobResponse(BaseModel):
     input_filename: str
     total_pages: int | None = None
     processed_pages: int = 0
+    cached_pages: int = 0
+    restored_pages: int = 0
     pages: list[PageResult] = Field(default_factory=list)
     output_pdf_url: str | None = None
     error: str | None = None
