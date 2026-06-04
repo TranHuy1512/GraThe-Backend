@@ -46,7 +46,12 @@ class PdfRestorationService:
         binarize_output: bool,
         overlap: bool,
     ) -> PdfJobResponse:
-        """Validate the upload, create a job, and launch background processing."""
+        """Validate the upload, create a job, process it, and return the final result.
+
+        The call blocks until the background pipeline finishes (completed or
+        failed), so the caller receives the definitive outcome in a single
+        request — no polling required.
+        """
 
         self._validate_options(patch_size, batch_size, threshold)
         upload_path = await self._save_upload(file)
@@ -59,10 +64,11 @@ class PdfRestorationService:
             )
 
         job_id = uuid4().hex
-        job = await pdf_job_manager.create_job(
+        await pdf_job_manager.create_job(
             job_id, file.filename or upload_path.name,
         )
 
+        # Launch the heavy pipeline in a background task …
         asyncio.create_task(
             self._process_pdf_job(
                 job_id=job_id,
@@ -76,6 +82,13 @@ class PdfRestorationService:
             name=f"pdf-restore-{job_id}",
         )
 
+        # … then wait for it to reach a terminal state before responding.
+        job = await pdf_job_manager.wait_for_completion(job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Job vanished unexpectedly.",
+            )
         return job.to_response()
 
     async def get_job_status(self, job_id: str) -> PdfJobResponse:

@@ -12,8 +12,8 @@ router = APIRouter()
 @router.post(
     "",
     response_model=PdfJobResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Submit a PDF for restoration",
+    status_code=status.HTTP_201_CREATED,
+    summary="Restore a PDF document",
 )
 async def submit_pdf_restoration(
     file: UploadFile = File(..., description="PDF file to restore"),
@@ -23,10 +23,11 @@ async def submit_pdf_restoration(
     binarize_output: bool = Form(settings.DEFAULT_BINARIZE_OUTPUT),
     overlap: bool = Form(settings.DEFAULT_OVERLAP),
 ) -> PdfJobResponse:
-    """Upload a PDF and start an async restoration job.
+    """Upload a PDF and wait for restoration to complete.
 
-    Returns immediately with a ``job_id`` that can be polled via
-    ``GET /pdf-restorations/{job_id}``.
+    The response is only sent once all pages have been processed (or the
+    job has failed), so the returned ``status`` will be either
+    ``completed`` or ``failed``.
     """
     return await pdf_restoration_service.submit_job(
         file=file,

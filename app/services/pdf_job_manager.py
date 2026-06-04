@@ -56,6 +56,7 @@ class PdfJobManager:
 
     def __init__(self) -> None:
         self._jobs: dict[str, JobState] = {}
+        self._events: dict[str, asyncio.Event] = {}
         self._lock = asyncio.Lock()
 
     async def create_job(self, job_id: str, filename: str) -> JobState:
@@ -67,7 +68,17 @@ class PdfJobManager:
                 input_filename=filename,
             )
             self._jobs[job_id] = job
+            self._events[job_id] = asyncio.Event()
             return job
+
+    async def wait_for_completion(self, job_id: str) -> JobState | None:
+        """Block until the job reaches a terminal state (completed/failed)."""
+
+        event = self._events.get(job_id)
+        if event is not None:
+            await event.wait()
+        async with self._lock:
+            return self._jobs.get(job_id)
 
     async def get_job(self, job_id: str) -> JobState | None:
         async with self._lock:
@@ -108,6 +119,10 @@ class PdfJobManager:
             job.status = JobStatus.COMPLETED
             job.output_pdf_url = output_pdf_url
             job.updated_at = datetime.now(timezone.utc)
+        # Signal waiters AFTER releasing the lock
+        event = self._events.get(job_id)
+        if event is not None:
+            event.set()
 
     async def mark_failed(self, job_id: str, error: str) -> None:
         async with self._lock:
@@ -117,6 +132,10 @@ class PdfJobManager:
             job.status = JobStatus.FAILED
             job.error = error
             job.updated_at = datetime.now(timezone.utc)
+        # Signal waiters AFTER releasing the lock
+        event = self._events.get(job_id)
+        if event is not None:
+            event.set()
 
     async def list_jobs(self) -> list[JobState]:
         async with self._lock:
@@ -130,6 +149,7 @@ class PdfJobManager:
         ]
         for jid in expired:
             del self._jobs[jid]
+            self._events.pop(jid, None)
 
 
 pdf_job_manager = PdfJobManager()
