@@ -29,6 +29,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Điền các biến môi trường cần thiết trong `backend/.env`. Ứng dụng đọc cấu hình từ file này
+khi chạy trong thư mục `backend`.
+
 ## Chạy development với auto reload
 
 ```bash
@@ -164,6 +167,55 @@ curl -X POST "http://127.0.0.1:8000/api/v1/restorations" \
 
 ```text
 http://127.0.0.1:8000/restored/{request_id}/page-001.png
+```
+
+### Upload Image To Cloudflare R2
+
+```text
+POST /api/v1/uploads/images
+Content-Type: multipart/form-data
+```
+
+Endpoint chỉ nhận file ảnh hợp lệ, giới hạn theo `MAX_UPLOAD_MB`, và lưu object theo cấu trúc:
+
+```text
+{R2_FASTAPI_PREFIX}/images/{YYYY}/{MM}/{DD}/{uuid}-{safe_filename}
+```
+
+Các biến cấu hình:
+
+```dotenv
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=
+R2_BUCKET_NAME=
+R2_ACCOUNT_ID=
+R2_ENDPOINT=
+R2_REGION=auto
+R2_PUBLIC_BASE_URL=
+R2_FASTAPI_PREFIX=backend
+```
+
+Bắt buộc có access key, secret key, bucket name, và một trong `R2_ENDPOINT` hoặc
+`R2_ACCOUNT_ID`. `public_url` trong response sẽ là `null` nếu không cấu hình
+`R2_PUBLIC_BASE_URL`.
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/uploads/images" \
+  -F "file=@/path/to/image.png"
+```
+
+Response:
+
+```json
+{
+  "filename": "image.png",
+  "content_type": "image/png",
+  "size_bytes": 12345,
+  "bucket": "your-bucket",
+  "object_key": "backend/images/2026/06/04/uuid-image.png",
+  "etag": "object-etag",
+  "public_url": "https://your-public-r2-domain/backend/images/2026/06/04/uuid-image.png"
+}
 ```
 
 ## Ghi chú luồng xử lý

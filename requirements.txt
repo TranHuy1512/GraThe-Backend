@@ -2,6 +2,7 @@ fastapi[standard]
 uvicorn[standard]
 python-multipart
 pydantic-settings
+boto3
 PyMuPDF
 pillow
 onnxruntime

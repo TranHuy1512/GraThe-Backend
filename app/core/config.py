@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     MAX_UPLOAD_MB: int = 50
     PDF_RENDER_DPI: int = 200
 
+    R2_ACCOUNT_ID: str | None = None
+    R2_ACCESS_KEY_ID: str | None = None
+    R2_SECRET_ACCESS_KEY: str | None = None
+    R2_BUCKET_NAME: str | None = None
+    R2_ENDPOINT: str | None = None
+    R2_REGION: str = "auto"
+    R2_PUBLIC_BASE_URL: str | None = None
+    R2_FASTAPI_PREFIX: str = "backend"
+    R2_GRADIO_PREFIX: str = "ai"
+
     DEFAULT_PATCH_SIZE: int = 512
     DEFAULT_BATCH_SIZE: int = 4
     DEFAULT_THRESHOLD: float = 0.5
