@@ -110,6 +110,54 @@ class R2StorageService:
             )
         return content_type
 
+    async def upload_file_bytes(
+        self,
+        content: bytes,
+        object_key: str,
+        content_type: str,
+    ) -> str | None:
+        """Upload raw bytes to R2 with a pre-built object key.
+
+        Returns the public URL if ``R2_PUBLIC_BASE_URL`` is configured.
+        """
+
+        self._validate_configuration()
+        try:
+            await run_in_threadpool(
+                self._put_object, object_key, content, content_type,
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Cloudflare R2 failed to upload the file.",
+            ) from exc
+        return self._build_public_url(object_key)
+
+    def build_page_object_key(
+        self, job_id: str, page_num: int, ext: str = ".png",
+    ) -> str:
+        """Build an R2 key for a single restored page image."""
+
+        date_path = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+        prefix = settings.R2_FASTAPI_PREFIX.strip("/")
+        return "/".join(
+            part
+            for part in (
+                prefix, "pdfs", date_path, job_id,
+                "pages", f"page-{page_num:03d}{ext}",
+            )
+            if part
+        )
+
+    def build_pdf_object_key(self, job_id: str, filename: str) -> str:
+        """Build an R2 key for the final merged PDF."""
+
+        date_path = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+        prefix = settings.R2_FASTAPI_PREFIX.strip("/")
+        return "/".join(
+            part for part in (prefix, "pdfs", date_path, job_id, filename) if part
+        )
+
     def _build_object_key(self, filename: str) -> str:
         date_path = datetime.now(timezone.utc).strftime("%Y/%m/%d")
         prefix = settings.R2_FASTAPI_PREFIX.strip("/")
