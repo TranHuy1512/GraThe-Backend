@@ -169,6 +169,46 @@ curl -X POST "http://127.0.0.1:8000/api/v1/restorations" \
 http://127.0.0.1:8000/restored/{request_id}/page-001.png
 ```
 
+### Restore Document Soft Output
+
+```text
+POST /api/v1/restorations/soft
+Content-Type: multipart/form-data
+```
+
+Endpoint này giữ nguyên model restore nhưng luôn gọi AI với `binarize_output=false`,
+vì vậy ảnh trả về là soft/grayscale output trước bước threshold. Kết quả cache
+không phụ thuộc vào `threshold`, phù hợp để frontend dùng slider thử nhiều ngưỡng
+mà không cần chạy lại model.
+
+Form fields:
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `file` | file | yes | - | Degraded image (`png`, `jpg`, `jpeg`, `webp`, `tif`, `tiff`, `bmp`). |
+| `patch_size` | int | no | `512` | Kích thước patch. Hỗ trợ `256`, `384`, `512`, `768`. |
+| `batch_size` | int | no | `4` | Số patch xử lý mỗi batch. |
+| `overlap` | bool | no | `true` | Patch overlap 50% để reconstruction mượt hơn. |
+
+Response:
+
+```json
+{
+  "request_id": "soft-content-hash",
+  "input_filename": "scan.jpg",
+  "input_type": "image",
+  "total_pages": 1,
+  "soft_output": {
+    "page": 1,
+    "filename": "soft-content-hash.png",
+    "url": "https://public-r2-domain/backend/cache/fourbi_v1/soft/soft-content-hash.png",
+    "content_hash": "soft-content-hash",
+    "cached": false
+  },
+  "recommended_threshold": 0.5
+}
+```
+
 ### Upload Image To Cloudflare R2
 
 ```text

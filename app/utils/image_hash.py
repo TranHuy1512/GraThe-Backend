@@ -28,6 +28,18 @@ class RestorationParams:
     overlap: bool
 
 
+@dataclass(frozen=True)
+class SoftRestorationParams:
+    """AI restoration parameters that affect non-binarized output.
+
+    ``threshold`` is intentionally excluded because soft output is produced
+    before binarization. ``batch_size`` only affects processing speed.
+    """
+
+    patch_size: int
+    overlap: bool
+
+
 def compute_content_hash(image: Image.Image, params: RestorationParams) -> str:
     """Return the SHA-256 hex digest of raw pixel data + AI parameters.
 
@@ -40,6 +52,20 @@ def compute_content_hash(image: Image.Image, params: RestorationParams) -> str:
         f"{params.patch_size}_{params.threshold}"
         f"_{params.binarize_output}_{params.overlap}"
     )
+
+    hasher = hashlib.sha256()
+    hasher.update(pixel_data)
+    hasher.update(params_str.encode())
+    return hasher.hexdigest()
+
+
+def compute_soft_content_hash(
+    image: Image.Image, params: SoftRestorationParams,
+) -> str:
+    """Return the SHA-256 digest for soft restored output cache keys."""
+
+    pixel_data = image.convert("RGB").tobytes()
+    params_str = f"soft_{params.patch_size}_{params.overlap}"
 
     hasher = hashlib.sha256()
     hasher.update(pixel_data)

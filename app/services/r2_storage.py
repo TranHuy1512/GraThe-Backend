@@ -139,6 +139,17 @@ class R2StorageService:
             part for part in (prefix, "cache", model, f"{content_hash}.png") if part
         )
 
+    def build_soft_cache_key(self, content_hash: str) -> str:
+        """Content-addressed key for non-binarized restored images."""
+
+        prefix = settings.R2_FASTAPI_PREFIX.strip("/")
+        model = settings.CACHE_MODEL_PREFIX.strip("/")
+        return "/".join(
+            part
+            for part in (prefix, "cache", model, "soft", f"{content_hash}.png")
+            if part
+        )
+
     def build_pdf_object_key(self, job_id: str, filename: str) -> str:
         """Per-job key for merged PDFs: ``{prefix}/pdfs/{job_id}/{filename}``."""
 
