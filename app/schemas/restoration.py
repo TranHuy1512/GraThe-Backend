@@ -32,3 +32,21 @@ class SoftRestorationResponse(BaseModel):
     total_pages: int
     soft_output: RestoredFile
     recommended_threshold: float = Field(..., ge=0, le=1)
+
+
+class ConfirmThresholdRequest(BaseModel):
+    """Request to finalize a soft-restored image with a specific threshold."""
+
+    soft_content_hash: str
+    threshold: float = Field(..., ge=0, le=1)
+
+
+class ConfirmThresholdResponse(BaseModel):
+    """Response after applying threshold and saving to R2."""
+
+    request_id: str
+    filename: str
+    url: str
+    content_hash: str
+    threshold: float
+    cached: bool = False

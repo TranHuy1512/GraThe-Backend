@@ -15,6 +15,7 @@ from PIL import Image, UnidentifiedImageError
 
 from app.core.config import settings
 from app.schemas.restoration import (
+    ConfirmThresholdResponse,
     RestorationResponse,
     RestoredFile,
     SoftRestorationResponse,
@@ -250,6 +251,102 @@ class RestorationService:
             ),
             recommended_threshold=settings.DEFAULT_THRESHOLD,
         )
+
+    async def confirm_threshold(
+        self,
+        soft_content_hash: str,
+        threshold: float,
+    ) -> ConfirmThresholdResponse:
+        """Apply a user-chosen threshold to a cached soft image and save the result.
+
+        This does NOT call the AI model again.  It downloads the soft
+        (non-binarized) output that was already cached in R2, applies a
+        simple pixel threshold using Pillow, uploads the binarized result
+        and returns the public URL.
+        """
+
+        if not 0 <= threshold <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="threshold must be between 0 and 1.",
+            )
+
+        # ---- 1. Build a deterministic hash for this (soft_hash, threshold) pair ----
+        import hashlib
+        final_hash = hashlib.sha256(
+            f"{soft_content_hash}_threshold_{threshold}".encode()
+        ).hexdigest()
+        cache_key = r2_storage_service.build_cache_key(final_hash)
+
+        # ---- 2. Check if the binarized result is already cached ----
+        if await r2_storage_service.object_exists(cache_key):
+            public_url = r2_storage_service.build_public_url(cache_key) or ""
+            logger.info(
+                "THRESHOLD CACHE HIT for soft=%s threshold=%.2f",
+                soft_content_hash[:12], threshold,
+            )
+            return ConfirmThresholdResponse(
+                request_id=final_hash,
+                filename=f"{final_hash}.png",
+                url=public_url,
+                content_hash=final_hash,
+                threshold=threshold,
+                cached=True,
+            )
+
+        # ---- 3. Download the soft image from R2 ----
+        soft_cache_key = r2_storage_service.build_soft_cache_key(soft_content_hash)
+        if not await r2_storage_service.object_exists(soft_cache_key):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Soft restored image not found. Please run soft restoration first.",
+            )
+
+        soft_bytes = await r2_storage_service.download_object(soft_cache_key)
+
+        # ---- 4. Apply threshold using Pillow (no AI model call) ----
+        binarized_bytes = await run_in_threadpool(
+            self._apply_threshold_to_image, soft_bytes, threshold,
+        )
+
+        # ---- 5. Upload the binarized result to R2 ----
+        public_url = await r2_storage_service.upload_file_bytes(
+            content=binarized_bytes,
+            object_key=cache_key,
+            content_type="image/png",
+        )
+
+        logger.info(
+            "THRESHOLD APPLIED for soft=%s threshold=%.2f -> %s",
+            soft_content_hash[:12], threshold, final_hash[:12],
+        )
+
+        return ConfirmThresholdResponse(
+            request_id=final_hash,
+            filename=f"{final_hash}.png",
+            url=public_url or "",
+            content_hash=final_hash,
+            threshold=threshold,
+            cached=False,
+        )
+
+    @staticmethod
+    def _apply_threshold_to_image(image_bytes: bytes, threshold: float) -> bytes:
+        """Apply binary threshold to a grayscale soft image.
+
+        Replicates the AI model logic:
+        ``torch.where(prediction > threshold, 1.0, 0.0)``
+        """
+        import numpy as np
+
+        img = Image.open(BytesIO(image_bytes)).convert("L")  # grayscale
+        arr = np.array(img, dtype=np.float32) / 255.0
+        binary = np.where(arr > threshold, 255, 0).astype(np.uint8)
+        result = Image.fromarray(binary, mode="L")
+
+        buf = BytesIO()
+        result.save(buf, format="PNG")
+        return buf.getvalue()
 
     def _restore_with_remote_model(
         self,
