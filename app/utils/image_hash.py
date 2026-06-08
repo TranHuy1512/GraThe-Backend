@@ -89,3 +89,22 @@ def read_image_as_png_bytes(path: Path) -> bytes:
         buf = BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
+
+
+def compute_pixel_hash(image: Image.Image) -> str:
+    """SHA-256 of raw pixel data only, independent of restoration params.
+
+    Use this to identify the *original* image regardless of which
+    restoration settings will be applied later.
+    """
+
+    pixel_data = image.convert("RGB").tobytes()
+    return hashlib.sha256(pixel_data).hexdigest()
+
+
+def image_to_png_bytes(image: Image.Image) -> bytes:
+    """Encode a PIL Image as PNG bytes without writing to disk."""
+
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()

@@ -3,6 +3,10 @@
 Pipeline: upload PDF → extract pages → hash each page → check R2 cache →
 restore uncached pages via AI (concurrent) → upload to R2 cache →
 merge all pages to PDF → upload final PDF → mark complete.
+
+A document record and a pdf_job record are persisted to SQLite at the start
+of each job.  Per-page results and final status are written as the pipeline
+progresses.
 """
 
 import asyncio
@@ -18,8 +22,10 @@ from gradio_client import Client, handle_file
 from PIL import Image
 
 from app.core.config import settings
+from app.schemas.document import DocumentCreate
 from app.schemas.pdf_restoration import JobStatus, PageResult, PdfJobResponse
 from app.services.document_loader import is_pdf
+from app.services.document_repository import document_repository
 from app.services.pdf_job_manager import pdf_job_manager
 from app.services.r2_storage import r2_storage_service
 from app.utils.files import safe_filename
@@ -70,9 +76,16 @@ class PdfRestorationService:
             )
 
         job_id = uuid4().hex
-        await pdf_job_manager.create_job(
-            job_id, file.filename or upload_path.name,
+        input_filename = file.filename or upload_path.name
+
+        # ---- Persist document + job records before processing ----
+        document_id = await self._create_pdf_document_record(
+            job_id=job_id,
+            filename=input_filename,
+            file_size=upload_path.stat().st_size,
         )
+
+        await pdf_job_manager.create_job(job_id, input_filename, document_id=document_id)
 
         # Launch the heavy pipeline in a background task …
         asyncio.create_task(
@@ -118,6 +131,80 @@ class PdfRestorationService:
         ]
 
     # ------------------------------------------------------------------ #
+    #  DB helpers                                                         #
+    # ------------------------------------------------------------------ #
+
+    async def _create_pdf_document_record(
+        self,
+        job_id: str,
+        filename: str,
+        file_size: int,
+    ) -> str | None:
+        """Create a document record for a PDF job.  Returns document_id or None."""
+        try:
+            await document_repository.create(
+                DocumentCreate(
+                    id=job_id,
+                    mode="pdf",
+                    file_name=filename,
+                    file_size=file_size,
+                    page_count=1,  # updated after extraction
+                )
+            )
+            await document_repository.create_pdf_job(
+                job_id=job_id,
+                document_id=job_id,
+                input_filename=filename,
+            )
+            return job_id
+        except Exception:
+            logger.exception("Failed to create document record for PDF job %s", job_id)
+            return None
+
+    async def _persist_page_result(self, job_id: str, page_result: PageResult) -> None:
+        try:
+            await document_repository.add_pdf_page(
+                job_id=job_id,
+                page=page_result.page,
+                filename=page_result.filename,
+                r2_object_key=page_result.r2_object_key,
+                public_url=page_result.public_url,
+                content_hash=page_result.content_hash,
+                cached=page_result.cached,
+            )
+        except Exception:
+            logger.exception("Failed to persist page %d for job %s", page_result.page, job_id)
+
+    async def _finalize_pdf_record(
+        self, job_id: str, total_pages: int, output_pdf_url: str | None, status_str: str,
+    ) -> None:
+        try:
+            from app.schemas.document import DocumentUpdate
+
+            await document_repository.update(
+                job_id,
+                DocumentUpdate(
+                    page_count=total_pages,
+                    output_pdf_url=output_pdf_url,
+                ),
+            )
+            await document_repository.update_pdf_job(
+                job_id,
+                status=status_str,
+                total_pages=total_pages,
+                processed_pages=total_pages,
+                output_pdf_url=output_pdf_url,
+            )
+        except Exception:
+            logger.exception("Failed to finalize DB records for job %s", job_id)
+
+    async def _fail_pdf_record(self, job_id: str, error: str) -> None:
+        try:
+            await document_repository.update_pdf_job(job_id, status="failed", error=error)
+        except Exception:
+            logger.exception("Failed to mark job %s as failed in DB", job_id)
+
+    # ------------------------------------------------------------------ #
     #  Background pipeline                                                #
     # ------------------------------------------------------------------ #
 
@@ -152,6 +239,16 @@ class PdfRestorationService:
                 job_id, JobStatus.PROCESSING, total_pages=total_pages,
             )
             logger.info("Job %s: extracted %d pages from PDF", job_id, total_pages)
+
+            # Update page_count in document record now that we know it
+            try:
+                from app.schemas.document import DocumentUpdate
+                await document_repository.update(job_id, DocumentUpdate(page_count=total_pages))
+                await document_repository.update_pdf_job(
+                    job_id, total_pages=total_pages, status="processing",
+                )
+            except Exception:
+                pass
 
             # ---- 2. Restore pages concurrently (semaphore-guarded) ----
             semaphore = asyncio.Semaphore(MAX_CONCURRENT_AI_CALLS)
@@ -200,11 +297,13 @@ class PdfRestorationService:
 
             # ---- 5. Done ----
             await pdf_job_manager.mark_completed(job_id, output_pdf_url=pdf_url)
+            await self._finalize_pdf_record(job_id, total_pages, pdf_url, "completed")
             logger.info("Job %s: completed successfully", job_id)
 
         except Exception as exc:
             logger.exception("Job %s failed: %s", job_id, exc)
             await pdf_job_manager.mark_failed(job_id, str(exc))
+            await self._fail_pdf_record(job_id, str(exc))
 
         finally:
             for p in temp_page_paths:
@@ -248,6 +347,7 @@ class PdfRestorationService:
                 cached=True,
             )
             await pdf_job_manager.add_page_result(job_id, page_result)
+            await self._persist_page_result(job_id, page_result)
             logger.info(
                 "Job %s: page %d CACHE HIT (%s…)",
                 job_id, page_num, content_hash[:12],
@@ -284,6 +384,7 @@ class PdfRestorationService:
             cached=False,
         )
         await pdf_job_manager.add_page_result(job_id, page_result)
+        await self._persist_page_result(job_id, page_result)
         logger.info(
             "Job %s: page %d restored & uploaded (%s…)",
             job_id, page_num, content_hash[:12],

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     AI_PROJECT_DIR: Path | None = None
     CLASSIFICATION_MODEL_PATH: Path | None = None
     UPLOAD_DIR: Path | None = None
+    DATABASE_PATH: Path | None = None
     AI_RESTORATION_SPACE: str = "elnino1512/AI-Document-image-enhencement"
     AI_RESTORATION_API_NAME: str = "/restore_image"
 
@@ -52,9 +53,13 @@ class Settings(BaseSettings):
             self.CLASSIFICATION_MODEL_PATH = self.BASE_DIR / "AI_models" / "mobilenet_v3_small_quant.onnx"
         if self.UPLOAD_DIR is None:
             self.UPLOAD_DIR = self.BASE_DIR / "storage" / "uploads"
+        if self.DATABASE_PATH is None:
+            self.DATABASE_PATH = self.BASE_DIR / "storage" / "app.db"
 
     def ensure_storage_dirs(self) -> None:
         self.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        assert self.DATABASE_PATH is not None
+        self.DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

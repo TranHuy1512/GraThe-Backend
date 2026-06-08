@@ -7,6 +7,7 @@ PyMuPDF
 pillow
 onnxruntime
 gradio_client
+aiosqlite
 
 # AI module dependencies
 gradio

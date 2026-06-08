@@ -21,6 +21,7 @@ class JobState:
     job_id: str
     status: JobStatus
     input_filename: str
+    document_id: str | None = None
     total_pages: int | None = None
     processed_pages: int = 0
     pages: list[PageResult] = field(default_factory=list)
@@ -39,6 +40,7 @@ class JobState:
         cached = sum(1 for p in self.pages if p.cached)
         return PdfJobResponse(
             job_id=self.job_id,
+            document_id=self.document_id,
             status=self.status,
             input_filename=self.input_filename,
             total_pages=self.total_pages,
@@ -62,13 +64,16 @@ class PdfJobManager:
         self._events: dict[str, asyncio.Event] = {}
         self._lock = asyncio.Lock()
 
-    async def create_job(self, job_id: str, filename: str) -> JobState:
+    async def create_job(
+        self, job_id: str, filename: str, document_id: str | None = None,
+    ) -> JobState:
         async with self._lock:
             self._cleanup_expired()
             job = JobState(
                 job_id=job_id,
                 status=JobStatus.PENDING,
                 input_filename=filename,
+                document_id=document_id,
             )
             self._jobs[job_id] = job
             self._events[job_id] = asyncio.Event()

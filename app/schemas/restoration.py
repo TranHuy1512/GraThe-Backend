@@ -21,6 +21,7 @@ class RestorationResponse(BaseModel):
     input_type: str
     total_pages: int
     outputs: list[RestoredFile]
+    document_id: str | None = None
 
 
 class SoftRestorationResponse(BaseModel):
@@ -39,6 +40,7 @@ class ConfirmThresholdRequest(BaseModel):
 
     soft_content_hash: str
     threshold: float = Field(..., ge=0, le=1)
+    document_id: str | None = None
 
 
 class ConfirmThresholdResponse(BaseModel):
@@ -50,3 +52,4 @@ class ConfirmThresholdResponse(BaseModel):
     content_hash: str
     threshold: float
     cached: bool = False
+    document_id: str | None = None

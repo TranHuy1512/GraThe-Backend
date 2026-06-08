@@ -150,6 +150,14 @@ class R2StorageService:
             if part
         )
 
+    def build_original_key(self, pixel_hash: str) -> str:
+        """Key for original images: ``{prefix}/originals/{pixel_hash}.png``."""
+
+        prefix = settings.R2_FASTAPI_PREFIX.strip("/")
+        return "/".join(
+            part for part in (prefix, "originals", f"{pixel_hash}.png") if part
+        )
+
     def build_pdf_object_key(self, job_id: str, filename: str) -> str:
         """Per-job key for merged PDFs: ``{prefix}/pdfs/{job_id}/{filename}``."""
 

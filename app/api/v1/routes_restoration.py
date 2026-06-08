@@ -66,10 +66,7 @@ async def confirm_threshold(
     already-cached soft output, applies a simple pixel threshold,
     uploads the binarized result to R2 and returns the public URL.
     """
-    return await restoration_service.confirm_threshold(
-        soft_content_hash=body.soft_content_hash,
-        threshold=body.threshold,
-    )
+    return await restoration_service.confirm_threshold(request=body)
 
 
 @router.get(

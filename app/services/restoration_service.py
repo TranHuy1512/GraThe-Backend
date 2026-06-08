@@ -2,11 +2,16 @@
 
 Flow: upload image → compute content hash → check R2 cache →
 cache hit: return immediately | cache miss: call AI → upload to R2 → return.
+
+After a successful restore the original image is uploaded to R2 under a
+param-independent key (``originals/{pixel_hash}.png``) and a document
+record is persisted to SQLite.
 """
 
 import logging
 from io import BytesIO
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
@@ -15,6 +20,7 @@ from PIL import Image, UnidentifiedImageError
 
 from app.core.config import settings
 from app.schemas.restoration import (
+    ConfirmThresholdRequest,
     ConfirmThresholdResponse,
     RestorationResponse,
     RestoredFile,
@@ -26,7 +32,9 @@ from app.utils.image_hash import (
     RestorationParams,
     SoftRestorationParams,
     compute_content_hash,
+    compute_pixel_hash,
     compute_soft_content_hash,
+    image_to_png_bytes,
     read_image_as_png_bytes,
 )
 
@@ -138,11 +146,20 @@ class RestorationService:
         if await r2_storage_service.object_exists(cache_key):
             public_url = r2_storage_service.build_public_url(cache_key) or ""
             logger.info("CACHE HIT for %s (%s)", filename, content_hash[:12])
+            document_id = await self._persist_document_record(
+                image=image,
+                filename=filename,
+                file_size=len(content),
+                content_hash=content_hash,
+                restored_url=public_url,
+                params=params,
+            )
             return self._build_response(
                 content_hash=content_hash,
                 input_filename=filename,
                 url=public_url,
                 cached=True,
+                document_id=document_id,
             )
 
         # ---- 4. Cache miss → save temp file, call AI ----
@@ -166,11 +183,21 @@ class RestorationService:
                 content_type="image/png",
             )
 
+            document_id = await self._persist_document_record(
+                image=image,
+                filename=filename,
+                file_size=len(content),
+                content_hash=content_hash,
+                restored_url=public_url or "",
+                params=params,
+            )
+
             return self._build_response(
                 content_hash=content_hash,
                 input_filename=filename,
                 url=public_url or "",
                 cached=False,
+                document_id=document_id,
             )
         finally:
             temp_path.unlink(missing_ok=True)
@@ -178,6 +205,68 @@ class RestorationService:
     # ------------------------------------------------------------------ #
     #  Helpers                                                            #
     # ------------------------------------------------------------------ #
+
+    async def _persist_document_record(
+        self,
+        image: Image.Image,
+        filename: str,
+        file_size: int,
+        content_hash: str,
+        restored_url: str,
+        params: RestorationParams,
+    ) -> str | None:
+        """Upload the original image to R2 and upsert a document record.
+
+        Returns the document_id, or None if the operation fails (non-fatal).
+        """
+        try:
+            from app.schemas.document import DocumentCreate
+            from app.services.document_repository import document_repository
+
+            # Check for existing record to avoid duplicates
+            existing = await document_repository.find_by_content_hash(content_hash)
+            if existing is not None:
+                return existing.id
+
+            # Upload original to R2 under a param-independent key
+            pixel_hash = await run_in_threadpool(compute_pixel_hash, image)
+            original_key = r2_storage_service.build_original_key(pixel_hash)
+
+            if await r2_storage_service.object_exists(original_key):
+                original_url = r2_storage_service.build_public_url(original_key) or ""
+            else:
+                original_png = await run_in_threadpool(image_to_png_bytes, image)
+                original_url = await r2_storage_service.upload_file_bytes(
+                    content=original_png,
+                    object_key=original_key,
+                    content_type="image/png",
+                ) or ""
+
+            width, height = image.size
+            document_id = uuid4().hex
+
+            await document_repository.create(
+                DocumentCreate(
+                    id=document_id,
+                    mode="image",
+                    file_name=filename,
+                    file_size=file_size,
+                    page_count=1,
+                    original_url=original_url,
+                    restored_url=restored_url,
+                    content_hash=content_hash,
+                    width=width,
+                    height=height,
+                    patch_size=params.patch_size,
+                    threshold=params.threshold,
+                    binarize_output=params.binarize_output,
+                    overlap=params.overlap,
+                )
+            )
+            return document_id
+        except Exception:
+            logger.exception("Failed to persist document record for %s", filename)
+            return None
 
     async def _read_valid_image_upload(
         self, file: UploadFile,
@@ -213,6 +302,7 @@ class RestorationService:
         input_filename: str,
         url: str,
         cached: bool,
+        document_id: str | None = None,
     ) -> RestorationResponse:
         return RestorationResponse(
             request_id=content_hash,
@@ -228,6 +318,7 @@ class RestorationService:
                     cached=cached,
                 )
             ],
+            document_id=document_id,
         )
 
     def _build_soft_response(
@@ -254,8 +345,7 @@ class RestorationService:
 
     async def confirm_threshold(
         self,
-        soft_content_hash: str,
-        threshold: float,
+        request: ConfirmThresholdRequest,
     ) -> ConfirmThresholdResponse:
         """Apply a user-chosen threshold to a cached soft image and save the result.
 
@@ -263,7 +353,13 @@ class RestorationService:
         (non-binarized) output that was already cached in R2, applies a
         simple pixel threshold using Pillow, uploads the binarized result
         and returns the public URL.
+
+        If ``request.document_id`` is provided the document record is updated
+        with the new restored URL and content hash.
         """
+
+        threshold = request.threshold
+        soft_content_hash = request.soft_content_hash
 
         if not 0 <= threshold <= 1:
             raise HTTPException(
@@ -285,6 +381,12 @@ class RestorationService:
                 "THRESHOLD CACHE HIT for soft=%s threshold=%.2f",
                 soft_content_hash[:12], threshold,
             )
+            await self._update_document_after_threshold(
+                document_id=request.document_id,
+                restored_url=public_url,
+                content_hash=final_hash,
+                threshold=threshold,
+            )
             return ConfirmThresholdResponse(
                 request_id=final_hash,
                 filename=f"{final_hash}.png",
@@ -292,6 +394,7 @@ class RestorationService:
                 content_hash=final_hash,
                 threshold=threshold,
                 cached=True,
+                document_id=request.document_id,
             )
 
         # ---- 3. Download the soft image from R2 ----
@@ -321,6 +424,13 @@ class RestorationService:
             soft_content_hash[:12], threshold, final_hash[:12],
         )
 
+        await self._update_document_after_threshold(
+            document_id=request.document_id,
+            restored_url=public_url or "",
+            content_hash=final_hash,
+            threshold=threshold,
+        )
+
         return ConfirmThresholdResponse(
             request_id=final_hash,
             filename=f"{final_hash}.png",
@@ -328,7 +438,32 @@ class RestorationService:
             content_hash=final_hash,
             threshold=threshold,
             cached=False,
+            document_id=request.document_id,
         )
+
+    async def _update_document_after_threshold(
+        self,
+        document_id: str | None,
+        restored_url: str,
+        content_hash: str,
+        threshold: float,
+    ) -> None:
+        if not document_id:
+            return
+        try:
+            from app.schemas.document import DocumentUpdate
+            from app.services.document_repository import document_repository
+
+            await document_repository.update(
+                document_id,
+                DocumentUpdate(
+                    restored_url=restored_url,
+                    content_hash=content_hash,
+                    threshold=threshold,
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to update document %s after threshold confirm", document_id)
 
     @staticmethod
     def _apply_threshold_to_image(image_bytes: bytes, threshold: float) -> bytes:

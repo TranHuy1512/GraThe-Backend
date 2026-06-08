@@ -33,6 +33,7 @@ class PdfJobResponse(BaseModel):
     """Response schema for a PDF restoration job."""
 
     job_id: str
+    document_id: str | None = None
     status: JobStatus
     input_filename: str
     total_pages: int | None = None
