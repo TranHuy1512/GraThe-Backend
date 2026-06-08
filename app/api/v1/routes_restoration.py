@@ -95,3 +95,32 @@ async def get_soft_image(content_hash: str) -> Response:
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+
+@router.get(
+    "/cached-image/{content_hash}",
+    summary="Serve a cached binarized restored image",
+    responses={200: {"content": {"image/png": {}}}},
+)
+async def get_cached_image(content_hash: str) -> Response:
+    """Proxy a binarized restored image from R2 cache.
+
+    Used to avoid CORS issues when the frontend needs to use
+    a threshold-confirmed image in a Canvas or with jsPDF (e.g.
+    for rebuilding a PDF after per-page threshold adjustments).
+    """
+    from app.services.r2_storage import r2_storage_service
+
+    cache_key = r2_storage_service.build_cache_key(content_hash)
+    if not await r2_storage_service.object_exists(cache_key):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cached image not found.",
+        )
+
+    image_bytes = await r2_storage_service.download_object(cache_key)
+    return Response(
+        content=image_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )

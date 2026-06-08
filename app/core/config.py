@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     CACHE_MODEL_PREFIX: str = "fourbi_v1"
 
     DEFAULT_PATCH_SIZE: int = 512
-    DEFAULT_BATCH_SIZE: int = 4
+    DEFAULT_BATCH_SIZE: int = 16
     DEFAULT_THRESHOLD: float = 0.5
     DEFAULT_BINARIZE_OUTPUT: bool = True
     DEFAULT_OVERLAP: bool = True

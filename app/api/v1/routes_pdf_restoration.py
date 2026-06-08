@@ -1,10 +1,13 @@
 """API routes for async PDF restoration jobs."""
 
-from fastapi import APIRouter, File, Form, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import Response
 
 from app.core.config import settings
 from app.schemas.pdf_restoration import PdfJobResponse
+from app.services.document_repository import document_repository
 from app.services.pdf_restoration_service import pdf_restoration_service
+from app.services.r2_storage import r2_storage_service
 
 router = APIRouter()
 
@@ -57,3 +60,56 @@ async def list_pdf_restorations() -> list[PdfJobResponse]:
 async def get_pdf_restoration_status(job_id: str) -> PdfJobResponse:
     """Poll the current status and progress of a restoration job."""
     return await pdf_restoration_service.get_job_status(job_id)
+
+
+@router.get(
+    "/{job_id}/pages",
+    summary="List all restored pages for a PDF job",
+)
+async def get_pdf_job_pages(job_id: str) -> list[dict]:
+    """Return per-page records stored in the database for a completed PDF job.
+
+    Unlike the job-status endpoint (which is in-memory), this reads from
+    the persistent ``pdf_pages`` table and survives server restarts.
+    """
+    pages = await document_repository.get_pdf_pages(job_id)
+    if not pages:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No pages found for job '{job_id}'.",
+        )
+    return pages
+
+
+@router.get(
+    "/{job_id}/page-image/{page_num}",
+    summary="Proxy a restored PDF page image from R2",
+    responses={200: {"content": {"image/png": {}}}},
+)
+async def get_pdf_page_image(job_id: str, page_num: int) -> Response:
+    """Proxy the restored page image bytes from R2.
+
+    This avoids CORS issues when the frontend needs to draw the image onto
+    a Canvas (e.g. for threshold preview or PDF rebuild with jsPDF).
+    """
+    pages = await document_repository.get_pdf_pages(job_id)
+    page = next((p for p in pages if p["page"] == page_num), None)
+    if page is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Page {page_num} not found for job '{job_id}'.",
+        )
+
+    r2_key = page["r2_object_key"]
+    if not await r2_storage_service.object_exists(r2_key):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Page image not found in storage.",
+        )
+
+    image_bytes = await r2_storage_service.download_object(r2_key)
+    return Response(
+        content=image_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )

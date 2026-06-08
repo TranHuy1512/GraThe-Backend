@@ -179,5 +179,16 @@ class DocumentRepository:
             )
             await db.commit()
 
+    async def get_pdf_pages(self, job_id: str) -> list[dict]:
+        """Return all pages for a job ordered by page number."""
+        async with get_db() as db:
+            async with db.execute(
+                "SELECT page, filename, r2_object_key, public_url, content_hash, cached "
+                "FROM pdf_pages WHERE job_id = ? ORDER BY page ASC",
+                (job_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
 
 document_repository = DocumentRepository()
