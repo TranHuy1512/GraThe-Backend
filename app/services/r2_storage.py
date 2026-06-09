@@ -6,12 +6,13 @@ for the content-addressed restoration cache and per-job PDF outputs.
 R2 key layout::
 
     {R2_FASTAPI_PREFIX}/
-    ├── cache/{CACHE_MODEL_PREFIX}/     ← content-addressed restored images
-    │   ├── {content_hash_1}.png
-    │   └── {content_hash_2}.png
-    ├── pdfs/{job_id}/                  ← merged PDF per job
-    │   └── restored.pdf
-    └── images/{date}/{uuid}-{name}     ← general-purpose uploads
+    ├── cache/{CACHE_MODEL_PREFIX}/          ← shared content-addressed cache (cross-user)
+    │   ├── {content_hash}.png
+    │   └── soft/{content_hash}.png
+    └── users/{user_id}/                     ← user-scoped private data
+        ├── originals/{pixel_hash}.png
+        ├── pdfs/{job_id}/restored.pdf
+        └── uploads/{date}/{uuid}-{name}
 """
 
 from datetime import datetime, timezone
@@ -38,7 +39,7 @@ class R2StorageService:
     #  General-purpose image upload (routes_upload)                       #
     # ------------------------------------------------------------------ #
 
-    async def upload_image(self, file: UploadFile) -> ImageUploadResponse:
+    async def upload_image(self, file: UploadFile, user_id: str = "") -> ImageUploadResponse:
         self._validate_configuration()
 
         if not file.filename:
@@ -56,7 +57,7 @@ class R2StorageService:
 
         content_type = await run_in_threadpool(self._detect_image_content_type, content)
         filename = safe_filename(file.filename)
-        object_key = self._build_upload_key(filename)
+        object_key = self._build_upload_key(filename, user_id)
 
         try:
             response = await run_in_threadpool(
@@ -130,38 +131,60 @@ class R2StorageService:
     #  Key builders                                                       #
     # ------------------------------------------------------------------ #
 
-    def build_cache_key(self, content_hash: str) -> str:
-        """Content-addressed key: ``{prefix}/cache/{model}/{hash}.png``."""
+    def build_cache_key(self, content_hash: str, user_id: str = "") -> str:
+        """Per-user content-addressed key: ``{prefix}/users/{user_id}/cache/{model}/{hash}.png``."""
 
         prefix = settings.R2_FASTAPI_PREFIX.strip("/")
         model = settings.CACHE_MODEL_PREFIX.strip("/")
+        if user_id:
+            return "/".join(
+                part for part in (prefix, "users", user_id, "cache", model, f"{content_hash}.png") if part
+            )
         return "/".join(
             part for part in (prefix, "cache", model, f"{content_hash}.png") if part
         )
 
-    def build_soft_cache_key(self, content_hash: str) -> str:
-        """Content-addressed key for non-binarized restored images."""
+    def build_soft_cache_key(self, content_hash: str, user_id: str = "") -> str:
+        """Per-user content-addressed key for non-binarized restored images."""
 
         prefix = settings.R2_FASTAPI_PREFIX.strip("/")
         model = settings.CACHE_MODEL_PREFIX.strip("/")
+        if user_id:
+            return "/".join(
+                part for part in (prefix, "users", user_id, "cache", model, "soft", f"{content_hash}.png") if part
+            )
         return "/".join(
             part
             for part in (prefix, "cache", model, "soft", f"{content_hash}.png")
             if part
         )
 
-    def build_original_key(self, pixel_hash: str) -> str:
-        """Key for original images: ``{prefix}/originals/{pixel_hash}.png``."""
+    def build_original_key(self, pixel_hash: str, user_id: str = "") -> str:
+        """User-scoped key for original images.
 
+        ``{prefix}/users/{user_id}/originals/{pixel_hash}.png``
+        Falls back to ``{prefix}/originals/{pixel_hash}.png`` when user_id is empty.
+        """
         prefix = settings.R2_FASTAPI_PREFIX.strip("/")
+        if user_id:
+            return "/".join(
+                part for part in (prefix, "users", user_id, "originals", f"{pixel_hash}.png") if part
+            )
         return "/".join(
             part for part in (prefix, "originals", f"{pixel_hash}.png") if part
         )
 
-    def build_pdf_object_key(self, job_id: str, filename: str) -> str:
-        """Per-job key for merged PDFs: ``{prefix}/pdfs/{job_id}/{filename}``."""
+    def build_pdf_object_key(self, job_id: str, filename: str, user_id: str = "") -> str:
+        """User-scoped key for merged PDFs.
 
+        ``{prefix}/users/{user_id}/pdfs/{job_id}/{filename}``
+        Falls back to ``{prefix}/pdfs/{job_id}/{filename}`` when user_id is empty.
+        """
         prefix = settings.R2_FASTAPI_PREFIX.strip("/")
+        if user_id:
+            return "/".join(
+                part for part in (prefix, "users", user_id, "pdfs", job_id, filename) if part
+            )
         return "/".join(
             part for part in (prefix, "pdfs", job_id, filename) if part
         )
@@ -238,14 +261,21 @@ class R2StorageService:
             )
         return content_type
 
-    def _build_upload_key(self, filename: str) -> str:
-        """Key for general-purpose uploads (not cache)."""
+    def _build_upload_key(self, filename: str, user_id: str = "") -> str:
+        """User-scoped key for general-purpose uploads.
 
+        ``{prefix}/users/{user_id}/uploads/{date}/{uuid}-{name}``
+        Falls back to ``{prefix}/uploads/{date}/{uuid}-{name}`` when user_id is empty.
+        """
         date_path = datetime.now(timezone.utc).strftime("%Y/%m/%d")
         prefix = settings.R2_FASTAPI_PREFIX.strip("/")
         unique_filename = f"{uuid4().hex}-{filename}"
+        if user_id:
+            return "/".join(
+                part for part in (prefix, "users", user_id, "uploads", date_path, unique_filename) if part
+            )
         return "/".join(
-            part for part in (prefix, "images", date_path, unique_filename) if part
+            part for part in (prefix, "uploads", date_path, unique_filename) if part
         )
 
     def _endpoint_url(self) -> str:

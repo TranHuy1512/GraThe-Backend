@@ -13,6 +13,7 @@ def _row_to_document(row) -> DocumentRecord:
     d = dict(row)
     return DocumentRecord(
         id=d["id"],
+        user_id=d.get("user_id", ""),
         mode=d["mode"],
         file_name=d["file_name"],
         file_size=d["file_size"],
@@ -45,14 +46,14 @@ class DocumentRepository:
             await db.execute(
                 """
                 INSERT INTO documents (
-                    id, mode, file_name, file_size, page_count,
+                    id, user_id, mode, file_name, file_size, page_count,
                     original_url, restored_url, content_hash, width, height,
                     soft_content_hash, soft_image_url, output_pdf_url,
                     patch_size, threshold, binarize_output, overlap
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    doc.id, doc.mode, doc.file_name, doc.file_size, doc.page_count,
+                    doc.id, doc.user_id, doc.mode, doc.file_name, doc.file_size, doc.page_count,
                     doc.original_url, doc.restored_url, doc.content_hash, doc.width, doc.height,
                     doc.soft_content_hash, doc.soft_image_url, doc.output_pdf_url,
                     doc.patch_size, doc.threshold,
@@ -73,13 +74,18 @@ class DocumentRepository:
                 row = await cursor.fetchone()
         return _row_to_document(row) if row else None
 
-    async def list_all(self, limit: int = 100, offset: int = 0) -> DocumentListResponse:
+    async def list_all(
+        self, user_id: str, limit: int = 100, offset: int = 0,
+    ) -> DocumentListResponse:
         async with get_db() as db:
-            async with db.execute("SELECT COUNT(*) FROM documents") as cursor:
+            async with db.execute(
+                "SELECT COUNT(*) FROM documents WHERE user_id = ?", (user_id,)
+            ) as cursor:
                 total = (await cursor.fetchone())[0]
             async with db.execute(
-                "SELECT * FROM documents ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                "SELECT * FROM documents WHERE user_id = ? "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (user_id, limit, offset),
             ) as cursor:
                 rows = await cursor.fetchall()
         return DocumentListResponse(
@@ -105,19 +111,26 @@ class DocumentRepository:
             await db.commit()
         return await self.get(doc_id)
 
-    async def delete(self, doc_id: str) -> bool:
+    async def delete(self, doc_id: str, user_id: str) -> bool:
+        """Hard-delete a document; only the owning user may delete."""
         async with get_db() as db:
             cursor = await db.execute(
-                "DELETE FROM documents WHERE id = ?", (doc_id,)
+                "DELETE FROM documents WHERE id = ? AND user_id = ?",
+                (doc_id, user_id),
             )
             await db.commit()
             return cursor.rowcount > 0
 
-    async def find_by_content_hash(self, content_hash: str) -> DocumentRecord | None:
+    async def find_by_content_hash(
+        self, content_hash: str, user_id: str,
+    ) -> DocumentRecord | None:
+        """Find the most recent document with this content hash for this user."""
         async with get_db() as db:
             async with db.execute(
-                "SELECT * FROM documents WHERE content_hash = ? ORDER BY created_at DESC LIMIT 1",
-                (content_hash,),
+                "SELECT * FROM documents "
+                "WHERE content_hash = ? AND user_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (content_hash, user_id),
             ) as cursor:
                 row = await cursor.fetchone()
         return _row_to_document(row) if row else None
@@ -131,23 +144,22 @@ class DocumentRepository:
         job_id: str,
         document_id: str,
         input_filename: str,
+        user_id: str = "",
     ) -> None:
         async with get_db() as db:
             await db.execute(
                 """
-                INSERT INTO pdf_jobs (job_id, document_id, status, input_filename)
-                VALUES (?, ?, 'pending', ?)
+                INSERT INTO pdf_jobs (job_id, user_id, document_id, status, input_filename)
+                VALUES (?, ?, ?, 'pending', ?)
                 """,
-                (job_id, document_id, input_filename),
+                (job_id, user_id, document_id, input_filename),
             )
             await db.commit()
 
     async def update_pdf_job(self, job_id: str, **fields: Any) -> None:
         if not fields:
             return
-        fields["updated_at"] = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
-        # updated_at is a SQL expression, handle separately
-        scalar_fields = {k: v for k, v in fields.items() if k != "updated_at"}
+        scalar_fields = {k: v for k, v in fields.items()}
         set_parts = [f"{k} = ?" for k in scalar_fields]
         set_parts.append("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
         values = list(scalar_fields.values()) + [job_id]
@@ -189,6 +201,15 @@ class DocumentRepository:
             ) as cursor:
                 rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def get_pdf_job_user(self, job_id: str) -> str | None:
+        """Return the user_id that owns the given PDF job, or None if not found."""
+        async with get_db() as db:
+            async with db.execute(
+                "SELECT user_id FROM pdf_jobs WHERE job_id = ?", (job_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        return row["user_id"] if row else None
 
 
 document_repository = DocumentRepository()

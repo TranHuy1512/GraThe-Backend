@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class DocumentCreate(BaseModel):
     id: str
+    user_id: str = ""
     mode: str  # 'image' | 'pdf'
     file_name: str
     file_size: int | None = None

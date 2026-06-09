@@ -57,6 +57,7 @@ class PdfRestorationService:
         threshold: float,
         binarize_output: bool,
         overlap: bool,
+        user_id: str = "",
     ) -> PdfJobResponse:
         """Validate the upload, create a job, process it, and return the final result.
 
@@ -83,6 +84,7 @@ class PdfRestorationService:
             job_id=job_id,
             filename=input_filename,
             file_size=upload_path.stat().st_size,
+            user_id=user_id,
         )
 
         await pdf_job_manager.create_job(job_id, input_filename, document_id=document_id)
@@ -97,6 +99,7 @@ class PdfRestorationService:
                 threshold=threshold,
                 binarize_output=binarize_output,
                 overlap=overlap,
+                user_id=user_id,
             ),
             name=f"pdf-restore-{job_id}",
         )
@@ -139,12 +142,14 @@ class PdfRestorationService:
         job_id: str,
         filename: str,
         file_size: int,
+        user_id: str = "",
     ) -> str | None:
         """Create a document record for a PDF job.  Returns document_id or None."""
         try:
             await document_repository.create(
                 DocumentCreate(
                     id=job_id,
+                    user_id=user_id,
                     mode="pdf",
                     file_name=filename,
                     file_size=file_size,
@@ -155,6 +160,7 @@ class PdfRestorationService:
                 job_id=job_id,
                 document_id=job_id,
                 input_filename=filename,
+                user_id=user_id,
             )
             return job_id
         except Exception:
@@ -217,6 +223,7 @@ class PdfRestorationService:
         threshold: float,
         binarize_output: bool,
         overlap: bool,
+        user_id: str = "",
     ) -> None:
         """Full pipeline executed as a background ``asyncio.Task``."""
 
@@ -263,6 +270,7 @@ class PdfRestorationService:
                         page_path=page_path,
                         params=params,
                         batch_size=batch_size,
+                        user_id=user_id,
                     )
 
             results: list[tuple[PageResult, bytes]] = await asyncio.gather(
@@ -287,7 +295,7 @@ class PdfRestorationService:
             # ---- 4. Upload final PDF to R2 ----
             await pdf_job_manager.update_status(job_id, JobStatus.UPLOADING)
             pdf_object_key = r2_storage_service.build_pdf_object_key(
-                job_id, "restored.pdf",
+                job_id, "restored.pdf", user_id,
             )
             pdf_url = await r2_storage_service.upload_file_bytes(
                 content=pdf_bytes,
@@ -321,8 +329,9 @@ class PdfRestorationService:
         page_path: Path,
         params: RestorationParams,
         batch_size: int,
+        user_id: str = "",
     ) -> tuple[PageResult, bytes]:
-        """Restore one page, checking the R2 cache first."""
+        """Restore one page, checking the per-user R2 cache first."""
 
         page_num = page_idx + 1
 
@@ -330,7 +339,7 @@ class PdfRestorationService:
         content_hash = await run_in_threadpool(
             compute_content_hash_from_path, page_path, params,
         )
-        cache_key = r2_storage_service.build_cache_key(content_hash)
+        cache_key = r2_storage_service.build_cache_key(content_hash, user_id)
 
         # 2. Check R2 cache
         if await r2_storage_service.object_exists(cache_key):

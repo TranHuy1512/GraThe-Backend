@@ -1,6 +1,7 @@
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response
 
+from app.core.auth import get_current_user
 from app.core.config import settings
 from app.schemas.restoration import (
     ConfirmThresholdRequest,
@@ -23,12 +24,14 @@ async def restore_document_soft(
     patch_size: int = Form(settings.DEFAULT_PATCH_SIZE),
     batch_size: int = Form(settings.DEFAULT_BATCH_SIZE),
     overlap: bool = Form(settings.DEFAULT_OVERLAP),
+    user_id: str = Depends(get_current_user),
 ) -> SoftRestorationResponse:
     return await restoration_service.restore_soft_upload(
         file=file,
         patch_size=patch_size,
         batch_size=batch_size,
         overlap=overlap,
+        user_id=user_id,
     )
 
 
@@ -40,6 +43,7 @@ async def restore_document(
     threshold: float = Form(settings.DEFAULT_THRESHOLD),
     binarize_output: bool = Form(settings.DEFAULT_BINARIZE_OUTPUT),
     overlap: bool = Form(settings.DEFAULT_OVERLAP),
+    user_id: str = Depends(get_current_user),
 ) -> RestorationResponse:
     return await restoration_service.restore_upload(
         file=file,
@@ -48,6 +52,7 @@ async def restore_document(
         threshold=threshold,
         binarize_output=binarize_output,
         overlap=overlap,
+        user_id=user_id,
     )
 
 
@@ -59,6 +64,7 @@ async def restore_document(
 )
 async def confirm_threshold(
     body: ConfirmThresholdRequest,
+    user_id: str = Depends(get_current_user),
 ) -> ConfirmThresholdResponse:
     """Finalize a soft-restored image with a user-chosen threshold.
 
@@ -66,7 +72,7 @@ async def confirm_threshold(
     already-cached soft output, applies a simple pixel threshold,
     uploads the binarized result to R2 and returns the public URL.
     """
-    return await restoration_service.confirm_threshold(request=body)
+    return await restoration_service.confirm_threshold(request=body, user_id=user_id)
 
 
 @router.get(
@@ -74,7 +80,10 @@ async def confirm_threshold(
     summary="Serve a cached soft-restored image",
     responses={200: {"content": {"image/png": {}}}},
 )
-async def get_soft_image(content_hash: str) -> Response:
+async def get_soft_image(
+    content_hash: str,
+    user_id: str = Depends(get_current_user),
+) -> Response:
     """Proxy the soft-restored image bytes from R2.
 
     This avoids CORS issues when the frontend needs to draw
@@ -82,7 +91,7 @@ async def get_soft_image(content_hash: str) -> Response:
     """
     from app.services.r2_storage import r2_storage_service
 
-    cache_key = r2_storage_service.build_soft_cache_key(content_hash)
+    cache_key = r2_storage_service.build_soft_cache_key(content_hash, user_id)
     if not await r2_storage_service.object_exists(cache_key):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -93,7 +102,7 @@ async def get_soft_image(content_hash: str) -> Response:
     return Response(
         content=image_bytes,
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "private, max-age=86400"},
     )
 
 
@@ -102,7 +111,10 @@ async def get_soft_image(content_hash: str) -> Response:
     summary="Serve a cached binarized restored image",
     responses={200: {"content": {"image/png": {}}}},
 )
-async def get_cached_image(content_hash: str) -> Response:
+async def get_cached_image(
+    content_hash: str,
+    user_id: str = Depends(get_current_user),
+) -> Response:
     """Proxy a binarized restored image from R2 cache.
 
     Used to avoid CORS issues when the frontend needs to use
@@ -111,7 +123,7 @@ async def get_cached_image(content_hash: str) -> Response:
     """
     from app.services.r2_storage import r2_storage_service
 
-    cache_key = r2_storage_service.build_cache_key(content_hash)
+    cache_key = r2_storage_service.build_cache_key(content_hash, user_id)
     if not await r2_storage_service.object_exists(cache_key):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -122,5 +134,5 @@ async def get_cached_image(content_hash: str) -> Response:
     return Response(
         content=image_bytes,
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "private, max-age=86400"},
     )

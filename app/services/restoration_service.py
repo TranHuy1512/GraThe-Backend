@@ -49,6 +49,7 @@ class RestorationService:
         patch_size: int,
         batch_size: int,
         overlap: bool,
+        user_id: str = "",
     ) -> SoftRestorationResponse:
         """Restore a single image without binarization.
 
@@ -68,7 +69,7 @@ class RestorationService:
             overlap=overlap,
         )
         content_hash = await run_in_threadpool(compute_soft_content_hash, image, params)
-        cache_key = r2_storage_service.build_soft_cache_key(content_hash)
+        cache_key = r2_storage_service.build_soft_cache_key(content_hash, user_id)
 
         if await r2_storage_service.object_exists(cache_key):
             public_url = r2_storage_service.build_public_url(cache_key) or ""
@@ -124,6 +125,7 @@ class RestorationService:
         threshold: float,
         binarize_output: bool,
         overlap: bool,
+        user_id: str = "",
     ) -> RestorationResponse:
         """Restore a single image, using R2 cache for deduplication."""
 
@@ -140,7 +142,7 @@ class RestorationService:
             overlap=overlap,
         )
         content_hash = await run_in_threadpool(compute_content_hash, image, params)
-        cache_key = r2_storage_service.build_cache_key(content_hash)
+        cache_key = r2_storage_service.build_cache_key(content_hash, user_id)
 
         # ---- 3. Check R2 cache ----
         if await r2_storage_service.object_exists(cache_key):
@@ -153,6 +155,7 @@ class RestorationService:
                 content_hash=content_hash,
                 restored_url=public_url,
                 params=params,
+                user_id=user_id,
             )
             return self._build_response(
                 content_hash=content_hash,
@@ -190,6 +193,7 @@ class RestorationService:
                 content_hash=content_hash,
                 restored_url=public_url or "",
                 params=params,
+                user_id=user_id,
             )
 
             return self._build_response(
@@ -214,6 +218,7 @@ class RestorationService:
         content_hash: str,
         restored_url: str,
         params: RestorationParams,
+        user_id: str = "",
     ) -> str | None:
         """Upload the original image to R2 and upsert a document record.
 
@@ -223,14 +228,14 @@ class RestorationService:
             from app.schemas.document import DocumentCreate
             from app.services.document_repository import document_repository
 
-            # Check for existing record to avoid duplicates
-            existing = await document_repository.find_by_content_hash(content_hash)
+            # Check for existing record to avoid duplicates for this user
+            existing = await document_repository.find_by_content_hash(content_hash, user_id)
             if existing is not None:
                 return existing.id
 
-            # Upload original to R2 under a param-independent key
+            # Upload original to R2 under a user-scoped, param-independent key
             pixel_hash = await run_in_threadpool(compute_pixel_hash, image)
-            original_key = r2_storage_service.build_original_key(pixel_hash)
+            original_key = r2_storage_service.build_original_key(pixel_hash, user_id)
 
             if await r2_storage_service.object_exists(original_key):
                 original_url = r2_storage_service.build_public_url(original_key) or ""
@@ -248,6 +253,7 @@ class RestorationService:
             await document_repository.create(
                 DocumentCreate(
                     id=document_id,
+                    user_id=user_id,
                     mode="image",
                     file_name=filename,
                     file_size=file_size,
@@ -346,6 +352,7 @@ class RestorationService:
     async def confirm_threshold(
         self,
         request: ConfirmThresholdRequest,
+        user_id: str = "",
     ) -> ConfirmThresholdResponse:
         """Apply a user-chosen threshold to a cached soft image and save the result.
 
@@ -372,7 +379,7 @@ class RestorationService:
         final_hash = hashlib.sha256(
             f"{soft_content_hash}_threshold_{threshold}".encode()
         ).hexdigest()
-        cache_key = r2_storage_service.build_cache_key(final_hash)
+        cache_key = r2_storage_service.build_cache_key(final_hash, user_id)
 
         # ---- 2. Check if the binarized result is already cached ----
         if await r2_storage_service.object_exists(cache_key):
@@ -398,7 +405,7 @@ class RestorationService:
             )
 
         # ---- 3. Download the soft image from R2 ----
-        soft_cache_key = r2_storage_service.build_soft_cache_key(soft_content_hash)
+        soft_cache_key = r2_storage_service.build_soft_cache_key(soft_content_hash, user_id)
         if not await r2_storage_service.object_exists(soft_cache_key):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

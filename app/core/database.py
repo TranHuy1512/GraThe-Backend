@@ -14,6 +14,7 @@ from app.core.config import settings
 _CREATE_DOCUMENTS = """
 CREATE TABLE IF NOT EXISTS documents (
     id                TEXT PRIMARY KEY,
+    user_id           TEXT NOT NULL DEFAULT '',
     mode              TEXT NOT NULL CHECK (mode IN ('image', 'pdf')),
     file_name         TEXT NOT NULL,
     file_size         INTEGER,
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS documents (
 _CREATE_PDF_JOBS = """
 CREATE TABLE IF NOT EXISTS pdf_jobs (
     job_id          TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL DEFAULT '',
     document_id     TEXT REFERENCES documents(id) ON DELETE CASCADE,
     status          TEXT NOT NULL DEFAULT 'pending',
     input_filename  TEXT NOT NULL,
@@ -64,14 +66,38 @@ CREATE TABLE IF NOT EXISTS pdf_pages (
 """
 
 _CREATE_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_documents_created_at ON documents(created_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash)",
-    "CREATE INDEX IF NOT EXISTS idx_pdf_pages_job ON pdf_pages(job_id, page)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_user_id    ON documents(user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(user_id, content_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_pdf_jobs_user_id     ON pdf_jobs(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_pdf_pages_job        ON pdf_pages(job_id, page)",
+]
+
+# Columns added after the initial schema — applied via ALTER TABLE so that
+# existing databases are migrated without data loss.
+_MIGRATIONS = [
+    ("documents", "user_id", "TEXT NOT NULL DEFAULT ''"),
+    ("pdf_jobs",  "user_id", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
+async def _apply_migrations(db: aiosqlite.Connection) -> None:
+    """Add new columns to existing tables if they don't already exist."""
+    async with db.execute("PRAGMA table_info(documents)") as cur:
+        doc_cols = {row[1] async for row in cur}
+    async with db.execute("PRAGMA table_info(pdf_jobs)") as cur:
+        job_cols = {row[1] async for row in cur}
+
+    col_map = {"documents": doc_cols, "pdf_jobs": job_cols}
+
+    for table, column, definition in _MIGRATIONS:
+        if column not in col_map.get(table, set()):
+            await db.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            )
+
+
 async def init_db() -> None:
-    """Create tables and indexes if they do not already exist."""
+    """Create tables, run column migrations, and build indexes."""
     db_path = settings.DATABASE_PATH
     assert db_path is not None
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,6 +107,7 @@ async def init_db() -> None:
         await db.execute(_CREATE_DOCUMENTS)
         await db.execute(_CREATE_PDF_JOBS)
         await db.execute(_CREATE_PDF_PAGES)
+        await _apply_migrations(db)
         for idx_sql in _CREATE_INDEXES:
             await db.execute(idx_sql)
         await db.commit()

@@ -8,6 +8,8 @@ pillow
 onnxruntime
 gradio_client
 aiosqlite
+PyJWT[crypto]>=2.8.0
+certifi
 
 # AI module dependencies
 gradio

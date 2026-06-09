@@ -1,8 +1,9 @@
 """API routes for async PDF restoration jobs."""
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response
 
+from app.core.auth import get_current_user
 from app.core.config import settings
 from app.schemas.pdf_restoration import PdfJobResponse
 from app.services.document_repository import document_repository
@@ -25,6 +26,7 @@ async def submit_pdf_restoration(
     threshold: float = Form(settings.DEFAULT_THRESHOLD),
     binarize_output: bool = Form(settings.DEFAULT_BINARIZE_OUTPUT),
     overlap: bool = Form(settings.DEFAULT_OVERLAP),
+    user_id: str = Depends(get_current_user),
 ) -> PdfJobResponse:
     """Upload a PDF and wait for restoration to complete.
 
@@ -39,39 +41,36 @@ async def submit_pdf_restoration(
         threshold=threshold,
         binarize_output=binarize_output,
         overlap=overlap,
+        user_id=user_id,
     )
-
-
-@router.get(
-    "",
-    response_model=list[PdfJobResponse],
-    summary="List all PDF restoration jobs",
-)
-async def list_pdf_restorations() -> list[PdfJobResponse]:
-    """Return all tracked PDF restoration jobs, most recent first."""
-    return await pdf_restoration_service.list_jobs()
-
-
-@router.get(
-    "/{job_id}",
-    response_model=PdfJobResponse,
-    summary="Get PDF restoration job status",
-)
-async def get_pdf_restoration_status(job_id: str) -> PdfJobResponse:
-    """Poll the current status and progress of a restoration job."""
-    return await pdf_restoration_service.get_job_status(job_id)
 
 
 @router.get(
     "/{job_id}/pages",
     summary="List all restored pages for a PDF job",
 )
-async def get_pdf_job_pages(job_id: str) -> list[dict]:
+async def get_pdf_job_pages(
+    job_id: str,
+    user_id: str = Depends(get_current_user),
+) -> list[dict]:
     """Return per-page records stored in the database for a completed PDF job.
 
     Unlike the job-status endpoint (which is in-memory), this reads from
     the persistent ``pdf_pages`` table and survives server restarts.
     """
+    # Verify the requesting user owns this job
+    job_owner = await document_repository.get_pdf_job_user(job_id)
+    if job_owner is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No job found with id '{job_id}'.",
+        )
+    if job_owner and job_owner != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this job.",
+        )
+
     pages = await document_repository.get_pdf_pages(job_id)
     if not pages:
         raise HTTPException(
@@ -86,12 +85,24 @@ async def get_pdf_job_pages(job_id: str) -> list[dict]:
     summary="Proxy a restored PDF page image from R2",
     responses={200: {"content": {"image/png": {}}}},
 )
-async def get_pdf_page_image(job_id: str, page_num: int) -> Response:
+async def get_pdf_page_image(
+    job_id: str,
+    page_num: int,
+    user_id: str = Depends(get_current_user),
+) -> Response:
     """Proxy the restored page image bytes from R2.
 
     This avoids CORS issues when the frontend needs to draw the image onto
     a Canvas (e.g. for threshold preview or PDF rebuild with jsPDF).
     """
+    # Verify ownership
+    job_owner = await document_repository.get_pdf_job_user(job_id)
+    if job_owner is not None and job_owner and job_owner != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this job.",
+        )
+
     pages = await document_repository.get_pdf_pages(job_id)
     page = next((p for p in pages if p["page"] == page_num), None)
     if page is None:

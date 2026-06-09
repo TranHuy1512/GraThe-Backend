@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     R2_GRADIO_PREFIX: str = "ai"
     CACHE_MODEL_PREFIX: str = "fourbi_v1"
 
+    SUPABASE_JWT_SECRET: str | None = None
+    SUPABASE_URL: str | None = None
+
     DEFAULT_PATCH_SIZE: int = 512
     DEFAULT_BATCH_SIZE: int = 16
     DEFAULT_THRESHOLD: float = 0.5
