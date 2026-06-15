@@ -10,6 +10,7 @@ gradio_client
 aiosqlite
 PyJWT[crypto]>=2.8.0
 certifi
+python-dotenv
 
 # AI module dependencies
 gradio
