@@ -51,7 +51,7 @@ def _get_ai_client() -> "Client":
     with _ai_client_lock:
         if _ai_client is None:
             logger.info("Connecting to AI space %s ...", settings.AI_RESTORATION_SPACE)
-            _ai_client = Client(settings.AI_RESTORATION_SPACE, hf_token=settings.HF_TOKEN)
+            _ai_client = Client(settings.AI_RESTORATION_SPACE, token=settings.HF_TOKEN)
             logger.info("AI client ready.")
     return _ai_client
 
