@@ -40,6 +40,21 @@ from app.utils.image_hash import (
 
 logger = logging.getLogger(__name__)
 
+_ai_client: "Client | None" = None
+_ai_client_lock = __import__("threading").Lock()
+
+
+def _get_ai_client() -> "Client":
+    global _ai_client
+    if _ai_client is not None:
+        return _ai_client
+    with _ai_client_lock:
+        if _ai_client is None:
+            logger.info("Connecting to AI space %s ...", settings.AI_RESTORATION_SPACE)
+            _ai_client = Client(settings.AI_RESTORATION_SPACE)
+            logger.info("AI client ready.")
+    return _ai_client
+
 
 class RestorationService:
 
@@ -499,8 +514,9 @@ class RestorationService:
         binarize_output: bool,
         overlap: bool,
     ) -> Path:
+        global _ai_client
         try:
-            client = Client(settings.AI_RESTORATION_SPACE)
+            client = _get_ai_client()
             result = client.predict(
                 image=handle_file(str(image_path)),
                 patch_size=patch_size,
@@ -510,17 +526,23 @@ class RestorationService:
                 overlap=overlap,
                 api_name=settings.AI_RESTORATION_API_NAME,
             )
+        except HTTPException:
+            raise
         except Exception as exc:
+            logger.exception("AI predict failed: %s", exc)
+            # Reset so the next request gets a fresh client (space may have restarted)
+            with _ai_client_lock:
+                _ai_client = None
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="AI restoration service failed to process the image.",
+                detail=f"AI restoration service error ({type(exc).__name__}): {exc}",
             ) from exc
 
         restored_path = self._extract_restored_path(result)
         if restored_path is None or not restored_path.exists():
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="AI restoration service did not return a restored image file.",
+                detail=f"AI service returned no file. Raw result: {result!r}",
             )
         return restored_path
 
