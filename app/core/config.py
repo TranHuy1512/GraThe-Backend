@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     DATABASE_PATH: Path | None = None
     AI_RESTORATION_SPACE: str = "elnino1512/AI-Document-image-enhencement"
     AI_RESTORATION_API_NAME: str = "/restore_image"
+    HF_TOKEN: str | None = None
 
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     MAX_UPLOAD_MB: int = 50
