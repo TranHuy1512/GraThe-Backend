@@ -6,12 +6,15 @@ single-instance deployment — jobs do not survive server restarts.
 """
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from app.schemas.pdf_restoration import JobStatus, PageResult, PdfJobResponse
 
 JOB_TTL_HOURS = 12
+
+_TERMINAL = {JobStatus.COMPLETED, JobStatus.FAILED}
 
 
 @dataclass
@@ -21,6 +24,8 @@ class JobState:
     job_id: str
     status: JobStatus
     input_filename: str
+    user_id: str = ""
+    file_hash: str = ""
     document_id: str | None = None
     total_pages: int | None = None
     processed_pages: int = 0
@@ -55,6 +60,19 @@ class JobState:
             progress_percent=self.progress_percent,
         )
 
+    def to_progress_event(self) -> str:
+        """Serialise current state as an SSE ``data:`` line."""
+        payload = {
+            "status": self.status.value,
+            "total_pages": self.total_pages,
+            "processed_pages": self.processed_pages,
+            "progress_percent": self.progress_percent,
+            "output_pdf_url": self.output_pdf_url,
+            "document_id": self.document_id,
+            "error": self.error,
+        }
+        return f"data: {json.dumps(payload)}\n\n"
+
 
 class PdfJobManager:
     """Thread-safe, in-memory store for PDF restoration job states."""
@@ -65,7 +83,12 @@ class PdfJobManager:
         self._lock = asyncio.Lock()
 
     async def create_job(
-        self, job_id: str, filename: str, document_id: str | None = None,
+        self,
+        job_id: str,
+        filename: str,
+        document_id: str | None = None,
+        user_id: str = "",
+        file_hash: str = "",
     ) -> JobState:
         async with self._lock:
             self._cleanup_expired()
@@ -74,10 +97,24 @@ class PdfJobManager:
                 status=JobStatus.PENDING,
                 input_filename=filename,
                 document_id=document_id,
+                user_id=user_id,
+                file_hash=file_hash,
             )
             self._jobs[job_id] = job
             self._events[job_id] = asyncio.Event()
             return job
+
+    async def find_active_job(self, user_id: str, file_hash: str) -> JobState | None:
+        """Return an in-progress job owned by *user_id* with the same *file_hash*, or None."""
+        async with self._lock:
+            for job in self._jobs.values():
+                if (
+                    job.user_id == user_id
+                    and job.file_hash == file_hash
+                    and job.status not in _TERMINAL
+                ):
+                    return job
+        return None
 
     async def wait_for_completion(self, job_id: str) -> JobState | None:
         """Block until the job reaches a terminal state (completed/failed)."""
@@ -127,7 +164,6 @@ class PdfJobManager:
             job.status = JobStatus.COMPLETED
             job.output_pdf_url = output_pdf_url
             job.updated_at = datetime.now(timezone.utc)
-        # Signal waiters AFTER releasing the lock
         event = self._events.get(job_id)
         if event is not None:
             event.set()
@@ -140,7 +176,6 @@ class PdfJobManager:
             job.status = JobStatus.FAILED
             job.error = error
             job.updated_at = datetime.now(timezone.utc)
-        # Signal waiters AFTER releasing the lock
         event = self._events.get(job_id)
         if event is not None:
             event.set()
@@ -149,6 +184,35 @@ class PdfJobManager:
         async with self._lock:
             self._cleanup_expired()
             return list(self._jobs.values())
+
+    async def subscribe(self, job_id: str):
+        """Async generator that yields SSE ``data:`` lines until the job completes.
+
+        Polls the in-memory state every 300 ms.  Each yield happens when
+        ``processed_pages`` changes or when the job reaches a terminal state.
+        Closes immediately if the job is not found.
+        """
+        last_processed = -1
+        last_status = None
+
+        while True:
+            async with self._lock:
+                job = self._jobs.get(job_id)
+
+            if job is None:
+                return
+
+            changed = job.processed_pages != last_processed or job.status != last_status
+            is_terminal = job.status in _TERMINAL
+
+            if changed or is_terminal:
+                last_processed = job.processed_pages
+                last_status = job.status
+                yield job.to_progress_event()
+                if is_terminal:
+                    return
+
+            await asyncio.sleep(0.3)
 
     def _cleanup_expired(self) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=JOB_TTL_HOURS)

@@ -10,6 +10,7 @@ progresses.
 """
 
 import asyncio
+import hashlib
 import logging
 from io import BytesIO
 from pathlib import Path
@@ -67,13 +68,22 @@ class PdfRestorationService:
         """
 
         self._validate_options(patch_size, batch_size, threshold)
-        upload_path = await self._save_upload(file)
+        upload_path, file_hash = await self._save_upload(file)
 
         if not is_pdf(upload_path):
             upload_path.unlink(missing_ok=True)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Unsupported file type. Please upload a PDF file.",
+            )
+
+        # ---- Duplicate detection: reject if the same file is already in-flight ----
+        existing = await pdf_job_manager.find_active_job(user_id, file_hash)
+        if existing is not None:
+            upload_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"message": "This document is already being processed.", "job_id": existing.job_id},
             )
 
         job_id = uuid4().hex
@@ -87,9 +97,14 @@ class PdfRestorationService:
             user_id=user_id,
         )
 
-        await pdf_job_manager.create_job(job_id, input_filename, document_id=document_id)
+        await pdf_job_manager.create_job(
+            job_id, input_filename,
+            document_id=document_id,
+            user_id=user_id,
+            file_hash=file_hash,
+        )
 
-        # Launch the heavy pipeline in a background task …
+        # Launch the heavy pipeline in the background and return immediately
         asyncio.create_task(
             self._process_pdf_job(
                 job_id=job_id,
@@ -104,13 +119,8 @@ class PdfRestorationService:
             name=f"pdf-restore-{job_id}",
         )
 
-        # … then wait for it to reach a terminal state before responding.
-        job = await pdf_job_manager.wait_for_completion(job_id)
-        if job is None:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Job vanished unexpectedly.",
-            )
+        job = await pdf_job_manager.get_job(job_id)
+        assert job is not None
         return job.to_response()
 
     async def get_job_status(self, job_id: str) -> PdfJobResponse:
@@ -535,8 +545,8 @@ class PdfRestorationService:
     #  Upload & validation                                                #
     # ------------------------------------------------------------------ #
 
-    async def _save_upload(self, file: UploadFile) -> Path:
-        """Persist the uploaded file to disk and enforce size limits."""
+    async def _save_upload(self, file: UploadFile) -> tuple[Path, str]:
+        """Persist the uploaded file to disk and return ``(path, sha256_hex)``."""
 
         if not file.filename:
             raise HTTPException(
@@ -552,10 +562,11 @@ class PdfRestorationService:
                 detail=f"File is larger than {settings.MAX_UPLOAD_MB} MB.",
             )
 
+        file_hash = hashlib.sha256(content).hexdigest()
         filename = safe_filename(file.filename)
         upload_path = settings.UPLOAD_DIR / f"{uuid4().hex}-{filename}"
         upload_path.write_bytes(content)
-        return upload_path
+        return upload_path, file_hash
 
     def _validate_options(
         self, patch_size: int, batch_size: int, threshold: float,
